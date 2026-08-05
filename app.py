@@ -75,10 +75,18 @@ if uploaded_file is not None:
     sales_col = st.sidebar.selectbox("Select Sales/Value Column", numeric_columns)
     
     if st.button("Analyze Geographies & Demographics"):
-        with st.spinner("Fetching Ward, LSOA, IMD, and Coordinate data from Postcodes.io..."):
+        with st.spinner("Cleaning data and fetching locations from Postcodes.io..."):
             
-            # Clean postcodes (remove spaces/nulls for consistent matching)
-            unique_postcodes = df[postcode_col].dropna().astype(str).unique().tolist()
+            original_row_count = len(df)
+            
+            # 1. PRE-CLEANING: Remove spaces, convert to uppercase, and drop nulls
+            df[postcode_col] = df[postcode_col].astype(str).str.replace(r'\s+', '', regex=True).str.upper()
+            
+            # Extract unique postcodes (ignoring empty/nan strings resulting from cleaning)
+            valid_postcodes_series = df[~df[postcode_col].isin(['NAN', 'NULL', 'NONE', ''])][postcode_col]
+            unique_postcodes = valid_postcodes_series.unique().tolist()
+            
+            # Fetch data from API
             geo_data = get_postcode_data(unique_postcodes)
             
             # Map data back to dataframe
@@ -90,14 +98,22 @@ if uploaded_file is not None:
             df['Latitude'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("Latitude"))
             df['Longitude'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("Longitude"))
             
+            # 2. POST-FILTERING: Omit rows where Ward is "Unknown"
+            df = df[df['Ward'] != "Unknown"].copy()
+            
             st.success("Geographic and Demographic mapping complete!")
+            
+            # Notify user of how many bad postcodes were removed
+            rows_omitted = original_row_count - len(df)
+            if rows_omitted > 0:
+                st.warning(f"⚠️ Cleaned up data: Omitted {rows_omitted} row(s) that contained invalid or unmappable postcodes.")
             
             # ---------------------
             # INTERACTIVE MAP
             # ---------------------
             st.write("### Interactive Sales Hotspots")
             
-            # Drop rows where coordinates are missing before mapping
+            # Drop rows where coordinates are missing before mapping (safeguard)
             df_map = df.dropna(subset=['Latitude', 'Longitude']).copy()
             
             if not df_map.empty:
@@ -166,9 +182,8 @@ if uploaded_file is not None:
             st.write("### Export Processed Data")
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="Download Enriched Data (Wards, LSOAs, Coordinates & IMD)",
+                label="Download Cleaned & Enriched Data",
                 data=csv,
-                file_name='processed_sales_demographics.csv',
+                file_name='cleaned_processed_sales_demographics.csv',
                 mime='text/csv',
             )
-          
