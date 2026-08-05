@@ -112,7 +112,7 @@ def extract_outcode(postcode_str):
 
 st.set_page_config(page_title="Sales Demographics Analyzer", layout="wide")
 st.title("📊 UK Sales Demographics & Geo-Analyzer")
-st.write("Upload your sales data to map postcodes to LSOAs, Wards, IMD Deprivation Deciles, and Advanced Theatre Analytics.")
+st.write("Upload your sales data to map postcodes, track multi-show loyalty, and analyze box office trends.")
 
 uploaded_file = st.file_uploader("Upload Sales Data (CSV)", type="csv")
 
@@ -134,6 +134,8 @@ if uploaded_file is not None:
     optional_cols = ["None"] + df.columns.tolist()
     optional_num_cols = ["None"] + numeric_columns
     
+    show_name_col = st.sidebar.selectbox("Show/Event Name Column", optional_cols, help="Allows filtering and cross-show analysis.")
+    customer_id_col = st.sidebar.selectbox("Customer/Owner ID Column", optional_cols, help="Unlocks the Retention & Loyalty tab.")
     fallback_col = st.sidebar.selectbox("Fallback District/Sector Column", optional_cols, help="Used only if the primary postcode fails.")
     venue_postcode = st.sidebar.text_input("Venue Postcode (For Catchment/Distance)", placeholder="e.g. SW1A 1AA")
     transaction_date_col = st.sidebar.selectbox("Transaction Date Column", optional_cols)
@@ -144,6 +146,9 @@ if uploaded_file is not None:
     # ---------------------------------
     # DATA PROCESSING
     # ---------------------------------
+    if 'processed_data' not in st.session_state:
+        st.session_state.processed_data = None
+
     if st.button("Analyze Data"):
         with st.spinner("Cleaning data and fetching locations from Postcodes.io (Including Fallbacks)..."):
             original_row_count = len(df)
@@ -195,171 +200,192 @@ if uploaded_file is not None:
                         })
                 
             geo_df = pd.DataFrame(mapped_rows, index=df.index)
-            df = pd.concat([df, geo_df], axis=1)
+            processed_df = pd.concat([df, geo_df], axis=1)
             
-            df = df[df['Match_Type'] != "Unmatched"].copy()
+            processed_df = processed_df[processed_df['Match_Type'] != "Unmatched"].copy()
             
+            # Ensure dates are parsed properly once during processing
+            if transaction_date_col != "None":
+                processed_df[transaction_date_col] = pd.to_datetime(processed_df[transaction_date_col], errors='coerce')
+            if event_date_col != "None":
+                processed_df[event_date_col] = pd.to_datetime(processed_df[event_date_col], errors='coerce')
+                
+            st.session_state.processed_data = processed_df
+            st.session_state.original_row_count = original_row_count
             st.success("Analysis complete!")
-            
-            full_matches = len(df[df['Match_Type'] == "Full Postcode"])
-            fallback_matches = len(df[df['Match_Type'] == "District Fallback"])
-            rows_omitted = original_row_count - len(df)
-            
-            st.info(f"📍 **Mapping Summary:** Mapped **{full_matches}** exact postcodes. Saved **{fallback_matches}** rows using district-level fallbacks. ")
-            if rows_omitted > 0:
-                st.warning(f"⚠️ Omitted {rows_omitted} row(s) that contained unmappable data.")
-            
-            # ---------------------------------
-            # TABS LAYOUT
-            # ---------------------------------
-            tab1, tab2 = st.tabs(["🌍 Geo & Demographics", "🎭 Advanced Theatre Analytics"])
-            
-            # ==========================================
-            # TAB 1: STANDARD GEO & DEMOGRAPHICS
-            # ==========================================
-            with tab1:
-                st.write("### Interactive Sales Hotspots")
-                df_map = df.dropna(subset=['Latitude', 'Longitude']).copy()
-                
-                if not df_map.empty:
-                    map_grouped = df_map.groupby([postcode_col, 'Latitude', 'Longitude', 'Match_Type', 'IMD_Decile'])[sales_col].sum().reset_index()
-                    fig_map = px.scatter_map(
-                        map_grouped, lat="Latitude", lon="Longitude", size=sales_col,
-                        hover_name=postcode_col, hover_data={"Match_Type": True, "IMD_Decile": True, "Latitude": False, "Longitude": False},
-                        color_discrete_sequence=["#FF4B4B"], zoom=5, height=550
-                    )
-                    fig_map.update_layout(map_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
-                    st.plotly_chart(fig_map, width="stretch")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("### Sales by Ward")
-                    df_wards = df[~df['Ward'].str.contains("Unknown")].copy()
-                    if not df_wards.empty:
-                        ward_sales = df_wards.groupby('Ward')[sales_col].sum().reset_index().sort_values(by=sales_col, ascending=False)
-                        st.plotly_chart(px.bar(ward_sales.head(10), x='Ward', y=sales_col), width="stretch")
-                    
-                with col2:
-                    st.write("### Sales by LSOA")
-                    df_lsoa = df[~df['LSOA'].str.contains("Unknown")].copy()
-                    if not df_lsoa.empty:
-                        lsoa_sales = df_lsoa.groupby('LSOA')[sales_col].sum().reset_index().sort_values(by=sales_col, ascending=False)
-                        st.plotly_chart(px.bar(lsoa_sales.head(10), x='LSOA', y=sales_col), width="stretch")
-                    
-                st.write("### Deprivation (IMD) Analysis")
-                df_imd = df[df['IMD_Decile'] != "Unknown"].copy()
-                if not df_imd.empty:
-                    df_imd['IMD_Decile'] = df_imd['IMD_Decile'].astype(int)
-                    imd_sales = df_imd.groupby('IMD_Decile')[sales_col].sum().reset_index()
-                    all_deciles = pd.DataFrame({'IMD_Decile': range(1, 11)})
-                    imd_sales = pd.merge(all_deciles, imd_sales, on='IMD_Decile', how='left').fillna(0)
-                    
-                    fig_imd = px.bar(imd_sales, x='IMD_Decile', y=sales_col, labels={'IMD_Decile': 'Decile (1 = Most Deprived)'})
-                    fig_imd.update_xaxes(tickmode='linear')
-                    st.plotly_chart(fig_imd, width="stretch")
 
-            # ==========================================
-            # TAB 2: ADVANCED THEATRE ANALYTICS
-            # ==========================================
-            with tab2:
-                st.write("## 🎭 Post-Show Analytics")
+    # ---------------------------------
+    # RESULTS DASHBOARD
+    # ---------------------------------
+    if st.session_state.processed_data is not None:
+        main_df = st.session_state.processed_data
+        
+        # Mapping summary
+        full_matches = len(main_df[main_df['Match_Type'] == "Full Postcode"])
+        fallback_matches = len(main_df[main_df['Match_Type'] == "District Fallback"])
+        rows_omitted = st.session_state.original_row_count - len(main_df)
+        
+        st.info(f"📍 **Mapping Summary:** Mapped **{full_matches}** exact postcodes. Saved **{fallback_matches}** rows using district-level fallbacks. ")
+        if rows_omitted > 0:
+            st.warning(f"⚠️ Omitted {rows_omitted} row(s) that contained unmappable data.")
+        
+        # Multi-show Global Filter
+        st.markdown("---")
+        filtered_df = main_df.copy()
+        if show_name_col != "None":
+            st.write("### 🎛️ Filter Analysis by Show")
+            all_shows = main_df[show_name_col].dropna().unique().tolist()
+            selected_shows = st.multiselect("Select Show(s) to Include:", all_shows, default=all_shows)
+            filtered_df = main_df[main_df[show_name_col].isin(selected_shows)].copy()
+            
+            if filtered_df.empty:
+                st.error("No data available for the selected shows. Please select at least one show.")
+                st.stop()
+
+        # ---------------------------------
+        # TABS LAYOUT
+        # ---------------------------------
+        tab1, tab2, tab3 = st.tabs(["🌍 Geo & Demographics", "🎭 Advanced Analytics", "🔄 Retention & Loyalty"])
+        
+        # ==========================================
+        # TAB 1: STANDARD GEO & DEMOGRAPHICS
+        # ==========================================
+        with tab1:
+            st.write("### Interactive Sales Hotspots")
+            df_map = filtered_df.dropna(subset=['Latitude', 'Longitude']).copy()
+            
+            if not df_map.empty:
+                map_grouped = df_map.groupby([postcode_col, 'Latitude', 'Longitude', 'Match_Type', 'IMD_Decile'])[sales_col].sum().reset_index()
+                fig_map = px.scatter_map(
+                    map_grouped, lat="Latitude", lon="Longitude", size=sales_col,
+                    hover_name=postcode_col, hover_data={"Match_Type": True, "IMD_Decile": True, "Latitude": False, "Longitude": False},
+                    color_discrete_sequence=["#FF4B4B"], zoom=5, height=550
+                )
+                fig_map.update_layout(map_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
+                st.plotly_chart(fig_map, width="stretch")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("### Sales by Ward")
+                df_wards = filtered_df[~filtered_df['Ward'].str.contains("Unknown")].copy()
+                if not df_wards.empty:
+                    ward_sales = df_wards.groupby('Ward')[sales_col].sum().reset_index().sort_values(by=sales_col, ascending=False)
+                    st.plotly_chart(px.bar(ward_sales.head(10), x='Ward', y=sales_col), width="stretch")
                 
-                st.markdown("---")
-                st.write("### 📍 Catchment Area (Distance Travelled)")
-                st.caption("Note: Distance calculation includes fallback district coordinates.")
-                if venue_postcode:
-                    v_lat, v_lon = get_venue_coordinates(venue_postcode)
-                    if v_lat and v_lon:
-                        df['Distance_Miles'] = df.apply(lambda row: calculate_distance(row['Latitude'], row['Longitude'], v_lat, v_lon), axis=1)
-                        df_dist = df.dropna(subset=['Distance_Miles'])
-                        
+            with col2:
+                st.write("### Sales by LSOA")
+                df_lsoa = filtered_df[~filtered_df['LSOA'].str.contains("Unknown")].copy()
+                if not df_lsoa.empty:
+                    lsoa_sales = df_lsoa.groupby('LSOA')[sales_col].sum().reset_index().sort_values(by=sales_col, ascending=False)
+                    st.plotly_chart(px.bar(lsoa_sales.head(10), x='LSOA', y=sales_col), width="stretch")
+                
+            st.write("### Deprivation (IMD) Analysis")
+            df_imd = filtered_df[filtered_df['IMD_Decile'] != "Unknown"].copy()
+            if not df_imd.empty:
+                df_imd['IMD_Decile'] = df_imd['IMD_Decile'].astype(int)
+                imd_sales = df_imd.groupby('IMD_Decile')[sales_col].sum().reset_index()
+                all_deciles = pd.DataFrame({'IMD_Decile': range(1, 11)})
+                imd_sales = pd.merge(all_deciles, imd_sales, on='IMD_Decile', how='left').fillna(0)
+                
+                fig_imd = px.bar(imd_sales, x='IMD_Decile', y=sales_col, labels={'IMD_Decile': 'Decile (1 = Most Deprived)'})
+                fig_imd.update_xaxes(tickmode='linear')
+                st.plotly_chart(fig_imd, width="stretch")
+
+        # ==========================================
+        # TAB 2: ADVANCED THEATRE ANALYTICS
+        # ==========================================
+        with tab2:
+            st.write("## 🎭 Post-Show Analytics")
+            
+            # Catchment Area
+            st.markdown("---")
+            st.write("### 📍 Catchment Area (Distance Travelled)")
+            if venue_postcode:
+                v_lat, v_lon = get_venue_coordinates(venue_postcode)
+                if v_lat and v_lon:
+                    filtered_df['Distance_Miles'] = filtered_df.apply(lambda row: calculate_distance(row['Latitude'], row['Longitude'], v_lat, v_lon), axis=1)
+                    df_dist = filtered_df.dropna(subset=['Distance_Miles'])
+                    if not df_dist.empty:
                         fig_dist = px.histogram(df_dist, x='Distance_Miles', nbins=30, 
                                                 title=f"Distance Travelled to Venue ({venue_postcode})",
                                                 labels={'Distance_Miles': 'Distance (Miles)', 'count': 'Number of Bookings'},
                                                 color_discrete_sequence=["#3366CC"])
                         st.plotly_chart(fig_dist, width="stretch")
-                    else:
-                        st.warning("Could not find coordinates for the provided Venue Postcode.")
                 else:
-                    st.info("Enter a Venue Postcode in the sidebar to unlock Catchment Area analysis.")
+                    st.warning("Could not find coordinates for the provided Venue Postcode.")
+            else:
+                st.info("Enter a Venue Postcode in the sidebar to unlock Catchment Area analysis.")
 
-                st.markdown("---")
-                st.write("### 📈 Booking Curve (Lead Time)")
-                if transaction_date_col != "None" and event_date_col != "None":
-                    df_dates = df.copy()
-                    df_dates[transaction_date_col] = pd.to_datetime(df_dates[transaction_date_col], errors='coerce')
-                    df_dates[event_date_col] = pd.to_datetime(df_dates[event_date_col], errors='coerce')
-                    df_dates = df_dates.dropna(subset=[transaction_date_col, event_date_col])
-                    
-                    if not df_dates.empty:
-                        df_dates['Days_Out'] = (df_dates[event_date_col] - df_dates[transaction_date_col]).dt.days
-                        df_dates = df_dates[(df_dates['Days_Out'] >= 0) & (df_dates['Days_Out'] <= 365)]
-                        
-                        metric_col = qty_col if qty_col != "None" else sales_col
-                        curve_data = df_dates.groupby('Days_Out')[metric_col].sum().reset_index()
-                        curve_data = curve_data.sort_values('Days_Out', ascending=False)
-                        curve_data['Cumulative_Volume'] = curve_data[metric_col].cumsum()
-                        
-                        fig_curve = px.line(curve_data, x='Days_Out', y='Cumulative_Volume', 
-                                            title="Cumulative Sales Curve Prior to Event",
-                                            labels={'Days_Out': 'Days Before Event', 'Cumulative_Volume': 'Total Volume'})
-                        fig_curve.update_xaxes(autorange="reversed")
-                        st.plotly_chart(fig_curve, width="stretch")
-                    else:
-                        st.warning("Could not parse dates properly. Please ensure columns contain valid date formats.")
-                else:
-                    st.info("Map the Transaction Date and Event Date columns in the sidebar to unlock Booking Curve analysis.")
-
-                st.markdown("---")
-                st.write("### 🎟️ Party Size Insights")
-                if order_id_col != "None" and qty_col != "None":
-                    party_data = df.groupby(order_id_col)[qty_col].sum().reset_index()
-                    
-                    def categorize_party(size):
-                        if size == 1: return "Solo (1)"
-                        elif size == 2: return "Couples (2)"
-                        elif 3 <= size <= 4: return "Families/Small Groups (3-4)"
-                        else: return "Large Groups (5+)"
-                        
-                    party_data['Party_Category'] = party_data[qty_col].apply(categorize_party)
-                    category_counts = party_data['Party_Category'].value_counts().reset_index()
-                    category_counts.columns = ['Party_Category', 'Count']
-                    
-                    fig_party = px.pie(category_counts, names='Party_Category', values='Count', 
-                                       title="Audience Breakdown by Party Size", hole=0.4)
-                    st.plotly_chart(fig_party, width="stretch")
-                else:
-                    st.info("Map the Order ID and Ticket Quantity columns in the sidebar to unlock Party Size Insights.")
-
-                st.markdown("---")
-                st.write("### 💷 Yield & Average Ticket Price by Demographic")
-                if qty_col != "None":
-                    df_yield = df[df['IMD_Decile'] != "Unknown"].copy()
-                    df_yield['IMD_Decile'] = df_yield['IMD_Decile'].astype(int)
-                    
-                    yield_grouped = df_yield.groupby('IMD_Decile').agg({sales_col: 'sum', qty_col: 'sum'}).reset_index()
-                    yield_grouped = yield_grouped[yield_grouped[qty_col] > 0]
-                    yield_grouped['Average_Price'] = yield_grouped[sales_col] / yield_grouped[qty_col]
-                    
-                    all_deciles_y = pd.DataFrame({'IMD_Decile': range(1, 11)})
-                    yield_grouped = pd.merge(all_deciles_y, yield_grouped, on='IMD_Decile', how='left').fillna(0)
-                    
-                    fig_yield = px.bar(yield_grouped, x='IMD_Decile', y='Average_Price',
-                                       title="Average Ticket Price Paid per Deprivation Decile",
-                                       labels={'IMD_Decile': 'Decile (1 = Most Deprived)', 'Average_Price': 'Avg Price Paid (£)'})
-                    fig_yield.update_xaxes(tickmode='linear')
-                    st.plotly_chart(fig_yield, width="stretch")
-                else:
-                    st.info("Map the Ticket Quantity column in the sidebar to unlock Yield Analysis.")
-
-            # ---------------------------------
-            # EXPORT
-            # ---------------------------------
+            # Booking Curve
             st.markdown("---")
-            st.write("### Export Processed Data")
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Download Cleaned & Enriched Data", data=csv,
-                file_name='cleaned_processed_sales_demographics.csv', mime='text/csv',
-)
+            st.write("### 📈 Booking Curve (Lead Time)")
+            if transaction_date_col != "None" and event_date_col != "None":
+                df_dates = filtered_df.dropna(subset=[transaction_date_col, event_date_col]).copy()
+                if not df_dates.empty:
+                    df_dates['Days_Out'] = (df_dates[event_date_col] - df_dates[transaction_date_col]).dt.days
+                    df_dates = df_dates[(df_dates['Days_Out'] >= 0) & (df_dates['Days_Out'] <= 365)]
                     
+                    metric_col = qty_col if qty_col != "None" else sales_col
+                    curve_data = df_dates.groupby('Days_Out')[metric_col].sum().reset_index()
+                    curve_data = curve_data.sort_values('Days_Out', ascending=False)
+                    curve_data['Cumulative_Volume'] = curve_data[metric_col].cumsum()
+                    
+                    fig_curve = px.line(curve_data, x='Days_Out', y='Cumulative_Volume', 
+                                        title="Cumulative Sales Curve Prior to Event",
+                                        labels={'Days_Out': 'Days Before Event', 'Cumulative_Volume': 'Total Volume'})
+                    fig_curve.update_xaxes(autorange="reversed")
+                    st.plotly_chart(fig_curve, width="stretch")
+            else:
+                st.info("Map the Transaction Date and Event Date columns in the sidebar to unlock Booking Curve analysis.")
+
+            # Transaction Day-of-Week Trends
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.write("### 📅 Day-of-Week Booking Trends")
+                if transaction_date_col != "None":
+                    df_trans = filtered_df.dropna(subset=[transaction_date_col]).copy()
+                    if not df_trans.empty:
+                        df_trans['Booking_Day'] = df_trans[transaction_date_col].dt.day_name()
+                        dow_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                        dow_sales = df_trans.groupby('Booking_Day')[sales_col].sum().reindex(dow_order).reset_index()
+                        
+                        fig_dow = px.bar(dow_sales, x='Booking_Day', y=sales_col, 
+                                         title="Total Sales by Transaction Day",
+                                         labels={'Booking_Day': 'Day of Week', sales_col: 'Revenue'})
+                        st.plotly_chart(fig_dow, width="stretch")
+                else:
+                    st.info("Map the Transaction Date to unlock.")
+
+            # Performance Day Yield
+            with col_b:
+                st.write("### 💷 Performance Day Yield")
+                if event_date_col != "None" and qty_col != "None":
+                    df_perf = filtered_df.dropna(subset=[event_date_col]).copy()
+                    if not df_perf.empty:
+                        df_perf['Perf_Day'] = df_perf[event_date_col].dt.day_name()
+                        dow_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                        yield_perf = df_perf.groupby('Perf_Day').agg({sales_col: 'sum', qty_col: 'sum'}).reindex(dow_order).reset_index()
+                        
+                        # Avoid division by zero
+                        yield_perf = yield_perf[yield_perf[qty_col] > 0]
+                        yield_perf['Avg_Price'] = yield_perf[sales_col] / yield_perf[qty_col]
+                        
+                        fig_perf = px.bar(yield_perf, x='Perf_Day', y='Avg_Price', 
+                                          title="Avg Ticket Price by Event Day",
+                                          labels={'Perf_Day': 'Performance Day', 'Avg_Price': 'Avg Price Paid (£)'})
+                        st.plotly_chart(fig_perf, width="stretch")
+                else:
+                    st.info("Map Event Date and Ticket Quantity to unlock.")
+
+            # Party Size
+            st.markdown("---")
+            st.write("### 🎟️ Party Size Insights")
+            if order_id_col != "None" and qty_col != "None":
+                party_data = filtered_df.groupby(order_id_col)[qty_col].sum().reset_index()
+                def categorize_party(size):
+                    if size == 1: return "Solo (1)"
+                    elif size == 2: return "Couples (2)"
+                    elif 3 <= size <= 4: return "Families/Small Groups (3-4)"
+                    else: return "Large Groups (5+)"
+                    
+                party_data['Party_Category'] =
