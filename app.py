@@ -79,26 +79,41 @@ if uploaded_file is not None:
             
             original_row_count = len(df)
             
-            # 1. PRE-CLEANING: Remove spaces, convert to uppercase, and drop nulls
-            df[postcode_col] = df[postcode_col].astype(str).str.replace(r'\s+', '', regex=True).str.upper()
+            # 1. STRICT PRE-CLEANING: Drop actual NA floats first, then convert to string
+            clean_series = df[postcode_col].dropna().astype(str)
+            clean_series = clean_series.str.replace(r'\s+', '', regex=True).str.upper()
             
-            # Extract unique postcodes (ignoring empty/nan strings resulting from cleaning)
-            valid_postcodes_series = df[~df[postcode_col].isin(['NAN', 'NULL', 'NONE', ''])][postcode_col]
-            unique_postcodes = valid_postcodes_series.unique().tolist()
+            # Filter out string representations of nulls
+            valid_postcodes_series = clean_series[~clean_series.isin(['NAN', 'NULL', 'NONE', ''])]
+            
+            # Convert to a strict list of strings to prevent JSON errors
+            unique_postcodes = [str(x) for x in valid_postcodes_series.unique()]
             
             # Fetch data from API
             geo_data = get_postcode_data(unique_postcodes)
             
-            # Map data back to dataframe
-            df['Ward'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("Ward", "Unknown"))
-            df['LSOA'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("LSOA", "Unknown"))
-            df['Country'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("Country", "Unknown"))
-            df['IMD_Rank'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("IMD_Rank", "Unknown"))
-            df['IMD_Decile'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("IMD_Decile", "Unknown"))
-            df['Latitude'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("Latitude"))
-            df['Longitude'] = df[postcode_col].map(lambda x: geo_data.get(x, {}).get("Longitude"))
+            # 2. MAP DATA (Using a batch approach to prevent pandas fragmentation warnings)
+            mapped_rows = []
+            for pc in df[postcode_col]:
+                # Re-clean the individual row's postcode to ensure it matches the API lookup key
+                clean_pc = str(pc).replace(' ', '').upper() if pd.notna(pc) else ""
+                
+                # Fetch dictionary of results or fallback to defaults
+                mapped_rows.append(geo_data.get(clean_pc, {
+                    "Ward": "Unknown", 
+                    "LSOA": "Unknown", 
+                    "Country": "Unknown",
+                    "IMD_Rank": "Unknown", 
+                    "IMD_Decile": "Unknown", 
+                    "Latitude": None, 
+                    "Longitude": None
+                }))
+                
+            # Concatenate new data to original dataframe efficiently
+            geo_df = pd.DataFrame(mapped_rows, index=df.index)
+            df = pd.concat([df, geo_df], axis=1)
             
-            # 2. POST-FILTERING: Omit rows where Ward is "Unknown"
+            # 3. POST-FILTERING: Omit rows where Ward is "Unknown"
             df = df[df['Ward'] != "Unknown"].copy()
             
             st.success("Geographic and Demographic mapping complete!")
@@ -113,15 +128,15 @@ if uploaded_file is not None:
             # ---------------------
             st.write("### Interactive Sales Hotspots")
             
-            # Drop rows where coordinates are missing before mapping (safeguard)
+            # Drop rows where coordinates are missing before mapping
             df_map = df.dropna(subset=['Latitude', 'Longitude']).copy()
             
             if not df_map.empty:
                 # Group by Postcode to aggregate sales for the map bubbles
                 map_grouped = df_map.groupby([postcode_col, 'Latitude', 'Longitude', 'Ward', 'IMD_Decile'])[sales_col].sum().reset_index()
                 
-                # Create the map using free carto-positron tiles
-                fig_map = px.scatter_mapbox(
+                # Create the map using the updated scatter_map function
+                fig_map = px.scatter_map(
                     map_grouped, 
                     lat="Latitude", 
                     lon="Longitude", 
@@ -132,7 +147,7 @@ if uploaded_file is not None:
                     zoom=5, 
                     height=550
                 )
-                fig_map.update_layout(mapbox_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
+                fig_map.update_layout(map_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
                 st.plotly_chart(fig_map, use_container_width=True)
             else:
                 st.warning("Could not map locations. No valid coordinates found for the provided postcodes.")
