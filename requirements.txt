@@ -2,3 +2,4 @@ streamlit
 pandas
 requests
 plotly
+starlette<1.4.0
