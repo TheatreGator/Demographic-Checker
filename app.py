@@ -614,7 +614,7 @@ if uploaded_file is not None:
                     with st.spinner("Gemini is analyzing your box office data and writing the report..."):
                         try:
                             genai.configure(api_key=gemini_api_key)
-                            model = genai.GenerativeModel('gemini-2.5-flash-lite')
+                            model = genai.GenerativeModel('gemini-3.5-flash-lite')
                             
                             persona_data = filtered_df.groupby('Persona')['_Volume_'].sum().sort_values(ascending=False).to_string()
                             ward_data = filtered_df[filtered_df['Ward'] != 'Unknown'].groupby('Ward')['_Volume_'].sum().sort_values(ascending=False).head(5).to_string()
