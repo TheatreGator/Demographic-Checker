@@ -3,4 +3,4 @@ pandas
 requests
 plotly
 starlette<1.4.0
-google-generativeai
+google-genai
